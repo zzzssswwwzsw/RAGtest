@@ -1,354 +1,150 @@
-# bge-m3 嵌入服务 · 用户手册
+# bge-m3 嵌入服务 · 脚本用户手册
 
-**这份手册写给调用方**：你写代码调这个服务，需要知道接口契约、怎么发批量、超时怎么设、
-向量怎么用、出错怎么办。你不需要关心显存。
+**这份手册写给操作本项目脚本的人**：把服务跑起来、压测档位、验收接口、跑测试。
 
-装服务、启服务、调档位、排障请看 [README.md](README.md)；
-本次所有数字都在本机（RTX 3060 Laptop 6GB）实测得到，换机器会变。
+- 想**写代码调接口**（请求/响应字段、批量、超时、向量怎么用）→ 见 [README.md](README.md) 的「接口」一节
+- 想了解**为什么这么设计**（显存预算、降级链路、实测过程）→ 见 [bge-m3-cuda-embedding-plan.md](bge-m3-cuda-embedding-plan.md)
 
-服务默认监听 `http://127.0.0.1:8000`，下文用 `BASE` 代指。
+所有数字均在本机（RTX 3060 Laptop 6GB / torch 2.3.1+cu121）实测，换机器会变。
 
 ## 目录
 
-- [1. 五分钟上手](#1-五分钟上手)
-- [2. 接口契约](#2-接口契约)
-- [3. 客户端写法](#3-客户端写法)
-- [4. 检索示例](#4-检索示例)
-- [5. 运行期观测](#5-运行期观测)
-- [6. 常见问题](#6-常见问题)
-- [7. 兼容性边界](#7-兼容性边界)
-- [8. 自检脚本](#8-自检脚本)
+- [1. 脚本总览](#1-脚本总览)
+- [2. 一次性准备](#2-一次性准备)
+- [3. 启动服务 start.ps1](#3-启动服务-startps1)
+- [4. 单独体检 preflight](#4-单独体检-preflight)
+- [5. 验收 check_api.py](#5-验收-check_apipy)
+- [6. 压测与回填档位 bench.py](#6-压测与回填档位-benchpy)
+- [7. 测试 pytest](#7-测试-pytest)
+- [8. 典型工作流](#8-典型工作流)
+- [9. 退出码与排障速查](#9-退出码与排障速查)
 
-## 1. 五分钟上手
+## 1. 脚本总览
 
-```bash
-curl -s -X POST http://127.0.0.1:8000/v1/embeddings \
-  -H "Content-Type: application/json" \
-  -d '{"input": "测试文本", "model": "bge-m3"}'
-```
-
-```json
-{
-  "object": "list",
-  "data": [
-    {"object": "embedding", "index": 0, "embedding": [0.0123, -0.0456, "...共 1024 个数"]}
-  ],
-  "model": "bge-m3",
-  "usage": {"prompt_tokens": 13, "total_tokens": 13}
-}
-```
-
-三件事确认服务可用：`status` 是 200、`embedding` 长度 1024、`usage.prompt_tokens` 大于 0。
-
-Python 最小客户端：
-
-```python
-import requests
-
-BASE = "http://127.0.0.1:8000"
-
-
-def embed(texts: list[str], timeout: float = 120) -> list[list[float]]:
-    """把一批文本编码成 1024 维归一化向量，返回顺序与输入一一对应。"""
-    response = requests.post(
-        f"{BASE}/v1/embeddings",
-        json={"input": texts, "model": "bge-m3"},
-        timeout=timeout,
-    )
-    response.raise_for_status()
-    return [item["embedding"] for item in response.json()["data"]]
-```
-
-`timeout` 别用默认值（`None` = 永不超时），也别设得太小，理由见
-[3.3 超时与重试](#33-超时与重试)。
-
-想让脚本把契约、边界、检索质量一次性验完，跑 [8. 自检脚本](#8-自检脚本)：
-
-```bash
-python scripts/check_api.py
-```
-
-## 2. 接口契约
-
-### 2.1 请求字段 `POST /v1/embeddings`
-
-| 字段 | 类型 | 必填 | 说明 |
+| 脚本 | 干什么 | 要服务已启动吗 | 什么时候用 |
 | --- | --- | --- | --- |
-| `input` | string \| string[] | 是 | 单条或一批，**单请求最多 256 条**；只能是字符串，不支持 token id 数组 |
-| `model` | string | 否 | 默认 `bge-m3`。**不做校验，原样回显**，见下方提示 |
-| `encoding_format` | `float` \| `base64` | 否 | 默认 `float`；`base64` 是 1024 个 float32 的原始字节，省带宽 |
-| `max_length` | int ≥ 1 | 否 | 本次请求的序列上限，不得超过当前档位上限（默认档位是 512） |
-| `dimensions` | int | 否 | 只接受 1024 或省略；本模型不支持降维 |
+| `scripts/start.ps1` | 探端口 → 体检 → 单 worker 拉起服务 | — | 每次开发 |
+| `python -m src.preflight` | 只体检、只列占用进程，不启动服务 | 否 | 启动被挡下时 |
+| `scripts/check_api.py` | 黑盒验收：接口契约 + 检索质量 | **是** | 改配置 / 换机器 / 部署后 |
+| `scripts/bench.py` | 逐档实测峰值显存，产出档位建议 | 否，自己加载模型 | 换机器 / 换 torch 版本 |
+| `pytest tests/` | 单元测试与冒烟测试 | 否 | 改动前后 |
 
-未知字段（如 OpenAI SDK 会带的 `user`）一律被忽略，不会报错。
+> **`bench.py` 和 `preflight` 都要自己加载模型**，所以**不能在服务运行期间跑**：
+> 6GB 卡装不下两份权重，会互相挤爆。先停服务再跑。
 
-> **`model` 不校验**：写成 `text-embedding-3-small` 甚至空串都返回 200，并把你的字符串原样回显。
-> 也就是说，如果你沿用别处的代码、只把 `base_url` 指过来，向量会是 bge-m3 的 1024 维而不报错。
-> 请自行确认客户端里写的模型名与实际服务一致。
+## 2. 一次性准备
 
-### 2.2 响应字段
+```powershell
+conda create -n bgem3 python=3.10 -y
+conda activate bgem3
+pip install -r requirements.txt
+```
 
-| 字段 | 说明 |
-| --- | --- |
-| `object` | 固定 `list` |
-| `data[].index` | 该向量对应输入的下标，**顺序与输入严格一致**（内部会重排组批，但结果已还原） |
-| `data[].embedding` | 1024 个数；`encoding_format=float` 时是数组，`base64` 时是字符串 |
-| `model` | 回显请求里的 `model` |
-| `usage.prompt_tokens` | 所有输入的 token 总数，按实际分词计算并计入截断 |
+再把解释器路径写进本机私有配置（已 gitignore）：
 
-### 2.3 语义细节
+```powershell
+cp .env.example .env.local
+# 编辑 .env.local：BGE_PYTHON=D:\path\to\conda\envs\bgem3\python.exe
+```
 
-**向量已 L2 归一化**，范数为 1（实测 0.999858 ~ 1.000196）。因此：
+`start.ps1` 解析解释器的优先级：`-Python` 参数 > `.env.local` 的 `BGE_PYTHON` > 同名环境变量 > PATH 上的 `python`。
+落到 PATH 兜底时它会先 `import fastapi, uvicorn` 验一次，失败就 `exit 3`，不会让你等到体检跑完才报错。
 
-- **内积即余弦相似度**，不需要再算模长；
-- **不要再归一化一次**，重复归一化在数值上无害但纯属浪费。
+## 3. 启动服务 start.ps1
 
-**同一文本在不同批量组成下不是逐位相同。** 批大小一变，FP16 的 reduction 顺序就变：
+```powershell
+powershell -File scripts/start.ps1
+```
 
-| 对比 | 分量最大偏差 |
-| --- | --- |
-| 同批量组成，重复请求 | `0`（逐位一致） |
-| 单条 vs 混在 3 条里（**同长度、零 padding**） | `2.4e-04` |
+脚本会先 `Set-Location` 到仓库根，所以**在哪个目录调用都行**。
 
-与 padding、批内位置都无关，纯粹是批大小效应。方向偏差可忽略（余弦 ≈ 1.000000），
-**不影响任何排序或召回**。但如果你要做向量指纹、逐位比对或增量更新，
-必须固定批量组成，否则同一条文本会算出略微不同的字节。
-
-**截断与 `usage` 的关系**：文本超过 `max_length` 会被截断（只编码前 `max_length` 个 token，
-不报错）。判断是否被截断的实用办法：
-
-> 若 `usage.prompt_tokens` 正好等于当前的 `max_length`，基本可以断定这条被截断了。
-
-当前档位上限随时可用 [`/healthz`](#5-运行期观测) 查到（`max_length` 字段）。
-
-**`float` 与 `base64` 的体积**（实测，含 JSON 包装）：
-
-| 编码 | 1 条向量 | 8 条向量 |
+| 参数 | 默认 | 说明 |
 | --- | --- | --- |
-| `float` | 19488 字节 | 155591 字节 |
-| `base64` | 5600 字节 | 约 45 KB |
+| `-Force` | 关 | 非交互，显存不足时直接降档继续（等价于 `BGE_FORCE=1`） |
+| `-Port` | 8000 | 监听端口 |
+| `-BindHost` | 127.0.0.1 | 默认只对本机开放 |
+| `-Python` | 空 | 解释器路径，覆盖 `.env.local` |
+| `-EnvOut` | `.env.runtime` | 档位交接文件 |
 
-`base64` 约省 3.5 倍带宽，且逐位可逆（实测与 `float` 解出的 float32 数组完全一致）：
+### 四步流程
 
-```python
-import base64
-import numpy as np
+1. **解析解释器**并验证依赖可导入
+2. **探端口** —— 用 `TcpListener` + `ExclusiveAddressUse` 试占一下。这步不能省：
+   uvicorn 要等 FastAPI 的 lifespan（含模型加载）跑完才 bind，端口冲突会先白烧十几秒和约 1.5 GiB 显存
+3. **显存体检**，把定下的档位写进 `.env.runtime`
+4. **单 worker 拉起 uvicorn** —— 多 worker 会在显存里复制多份模型，6GB 卡直接爆
 
-payload = response.json()["data"][0]["embedding"]      # encoding_format=base64
-vector = np.frombuffer(base64.b64decode(payload), dtype=np.float32)   # shape (1024,)
-```
-
-**空串是个坑**：`input=""` 或纯空白会返回 200 和一个范数为 1 的向量——它只编码了特殊 token，
-与任何文本都谈不上语义相似。这类向量混进向量库会污染召回。
-
-> 请在客户端侧过滤空串与纯空白：`texts = [t.strip() for t in texts if t.strip()]`。
-
-### 2.4 错误码与处置
-
-| 码 | 含义 | 你该做什么 |
-| --- | --- | --- |
-| 400 | 入参不合法：条数 > 256、`input` 为空列表、`encoding_format` 不是 float/base64、`dimensions` 不是 1024、`max_length` 超过档位上限 | 改请求；`detail` 里有具体原因 |
-| 422 | 不符合 schema：`input` 不是字符串/字符串数组（如传了数字或 token 数组）、`max_length=0` 等字段越界 | 改请求 |
-| 503 | 模型尚未就绪（服务刚启动、正在加载权重） | 退避重试；`/healthz` 能通了再发业务请求 |
-| 507 | 显存不足，且逐级降级后仍失败 | **不要盲目重试**：缩短文本、减小批量，或查看 [`/preflight`](#5-运行期观测) 后清理显存占用 |
-
-## 3. 客户端写法
-
-### 3.1 批量：一次发多少条
-
-服务端会自己按 token 预算组批，你不需要按档位去凑批大小。实践建议：
-
-- **别一条一条发**。单条请求约 0.14s，但其中有固定开销；一次发几十条能显著摊薄（实测 32 条 / 8416 token 只要 0.47s）。
-- **上限 256 条**，实测 256 条短文本（9216 token）1.10s，完全可以一次发满。
-- **长文本要按 token 估**：批量耗时由 `条数 × 截断后长度` 决定。发 256 条 1000 字的文本，
-  截断到 512 后总量约 13 万 token，耗时约 8~10 秒。
-- **要算总 token 预算**：`sum(min(len(每条), 档位上限))` 除以 8192 就是大致批次数，乘以约 0.5s 就是量级。
-
-### 3.2 延迟量级（实测，默认档位）
-
-| 请求 | token | 耗时 |
-| --- | --- | --- |
-| 1 条短文本 | 5 | 0.14 s |
-| 32 条 × 约 400 字 | 8416 | 0.47 s |
-| 256 条 × 约 60 字 | 9216 | 1.10 s |
-| 256 条 × 约 1000 字（截断到 512） | 约 131000 | 约 8~10 s |
-
-以上都是 GPU 路径。**一旦某条请求被降级到 CPU，单条 4096 token 要 45 秒**，见
-[6. 常见问题](#6-常见问题)。
-
-### 3.3 超时与重试
-
-**关键事实（实测）：客户端超时不会取消服务端的计算。**
-
-客户端在 1.5s 放弃等待后，那个大请求仍在服务端跑完并正常返回（服务端日志记录了 200），
-并且一直占着一个并发槽。也就是说，"超时后立刻重试"只会让 GPU 上叠加更多计算，越试越慢。
-
-据此建议：
-
-- `timeout` 设 **120 秒**（而不是 5 或 10 秒）；批量越大越要放宽。
-- 超时后**不要立即重试**，也不要并发重试；先确认服务还活着（`/healthz`），再决定是减小批量还是等。
-- 按错误码区分重试与否：`503` 退避重试；`507` 减小负载；`400/422` 改请求；**5xx 之外不要重试**。
-
-### 3.4 并发
-
-服务端默认只允许 **2 个** 编码请求同时进行（`BGE_CONCURRENCY`），多余的会在信号量上排队。
-
-- 客户端并发 **2~4 路** 足够打满；开到几十路只会让所有请求一起变慢。
-- 同一个服务是**单 GPU 共享资源**，多个进程/多个同事同时调用时要约定用量，别互相拖慢。
-
-### 3.5 向量落库
-
-- 维度 **1024**，类型 **float32**（`base64` 直接解出 float32；`float` 路径建议落库前 `np.float32`）。
-- 相似度度量选 **cosine**（等价地：对归一化向量用 inner product）。不要选欧氏距离。
-- 不要重复归一化（已归一化）。
-- 向量里**不含** query/document 的类型信息：本服务不对文本做任何前缀或指令加工，
-  你只要保证 query 和 document 走同一个接口编码即可。
-
-## 4. 检索示例
-
-完整可运行（下面是实测输出）：
-
-```python
-import numpy as np
-import requests
-
-BASE = "http://127.0.0.1:8000"
-
-docs = [
-    "bge-m3 支持稠密、稀疏与多向量三种检索方式",
-    "今天食堂的红烧肉有点咸",
-    "Windows 下 PowerShell 读取无 BOM 的 UTF-8 文件会按 ANSI 解码",
-    "向量数据库通常用余弦相似度或内积做召回",
-]
-query = "怎么把文本变成向量做召回"
-
-response = requests.post(
-    f"{BASE}/v1/embeddings",
-    json={"input": docs + [query], "model": "bge-m3"},
-    timeout=120,
-)
-vectors = np.asarray([d["embedding"] for d in response.json()["data"]], dtype=np.float32)
-
-# 已 L2 归一化，内积即余弦
-scores = vectors[:-1] @ vectors[-1]
-for rank, i in enumerate(np.argsort(-scores), start=1):
-    print(f"{rank}. {scores[i]:+.4f}  {docs[i]}")
-```
-
-实测排序与得分：
+### 日志怎么读
 
 ```
-1. +0.7447  向量数据库通常用余弦相似度或内积做召回
-2. +0.4986  bge-m3 支持稠密、稀疏与多向量三种检索方式
-3. +0.4961  Windows 下 PowerShell 读取无 BOM 的 UTF-8 文件会按 ANSI 解码
-4. +0.3762  今天食堂的红烧肉有点咸
+[ OK ] 显存体检通过，开始加载模型
+  档位 safe  序列上限 512  批大小 8  硬上限 3809 MiB
+  显存总量 6144 MiB  [########------------------------]  已用 1549  空闲 4594  (来源 nvml)
+  本次所需 2700 MiB = 权重 1150 + 上下文 500 + 激活 250 + 余量 800
+  系统内存可用 5505 MiB（CPU 兜底门槛 4096）[OK]
+  占用显存的进程（按占用降序）：
+         PID  进程                                   显存
+       32340  TextInputHost.exe                   未上报
+    提示：WDDM 驱动未上报单进程占用，需按进程名人工判断。
+已写出 .env.runtime：BGE_PRESET=safe BGE_MAX_LENGTH=512 BGE_BATCH=8
+  inherited BGE_PRESET=safe from .env.runtime
+Starting bge-m3 embedding service on http://127.0.0.1:8000 (single worker)...
+INFO:     Waiting for application startup.
+INFO bge.embedder: 显存硬上限已设为 3809 MiB（总量 6143 × 0.62）
+INFO bge.embedder: 模型 D:\path\to\models\bge-m3 已加载（后端 flagembedding，设备 cuda，档位 safe(override)）
+INFO bge.api: 服务就绪，接口见 /docs、/healthz、/preflight
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
 ```
 
-注意得分的绝对水平（0.38~0.74）：bge-m3 的相似度**普遍偏高**，两条无关文本也可能有 0.3 以上。
-**不要用 0.8 之类的固定阈值做"是否相关"的判断**，用排序取 Top-K，阈值请在你自己数据上标定。
+两个正常但容易误会的点：
 
-## 5. 运行期观测
+- **体检报告打印了两遍**（`safe` 和 `safe(override)`）。第一遍是启动脚本的命令行体检，
+  第二遍是服务自己启动时又查一次当保险；显示 `(override)` 是因为档位改由 `.env.runtime` 显式指定。
+- **`Uvicorn running on ...` 之前连不上是正常的**。要等模型加载完才 bind，约十几到几十秒。
 
-### `GET /healthz`
+停服务：在跑它的窗口按 `Ctrl+C`。
 
-```json
-{
-  "status": "ok",
-  "preset": "safe",
-  "max_length": 512,
-  "batch": 8,
-  "token_budget": 8192,
-  "degradations": []
-}
+## 4. 单独体检 preflight
+
+只想看显存够不够、谁占着，不想加载模型：
+
+```powershell
+python -m src.preflight                 # 交互模式
+python -m src.preflight --force         # 非交互，不足时自动降档
+python -m src.preflight --env-out .env.runtime
 ```
 
-调用方需要关注三个字段：
-
-| 字段 | 看点 |
+| 参数 | 说明 |
 | --- | --- |
-| `max_length` | 当前档位的序列上限，决定你的文本会不会被截断 |
-| `degradations` | 非空表示有请求被兜底到 CPU（慢的元凶就在这），数组里会写明是哪条文本 |
-| `preset` | 带 `(forced)` 后缀表示启动时显存不足已自动降档，你能用的上限随之变小 |
+| `--force` | 非交互模式，显存不足时自动降档继续 |
+| `--env-out PATH` | 把最终档位写成 env 文件（默认 `.env.runtime`） |
 
-### `GET /preflight`
+**交互模式**下显存不足会列出占用进程并让你决定清理谁，**绝不自动结束他人进程**。
+写出的 `.env.runtime` 含四个键（`BGE_PRESET` / `BGE_MAX_LENGTH` / `BGE_BATCH` / `BGE_MEM_FRACTION`），
+`start.ps1` 会逐行继承，保证体检降过的档不会在服务侧被还原回去。
 
-显存体检：`ok`、`need_mib`、`free_mib`、`host_ram_ok`，以及占用显存的进程列表。
-收到 `507` 时看它，判断是"现在显存被别的程序占了"还是"你这次批量太大"。
+## 5. 验收 check_api.py
 
-## 6. 常见问题
-
-**Q：这条请求为什么花了 45 秒？**
-该请求被降级到了 CPU。触发条件是 GPU 显存装不下这个批次（通常是单条超长文本）。查
-`/healthz` 的 `degradations`，非空即命中。要避免就缩短单条文本、减小批量。
-
-**Q：返回 507，我的载荷不大啊？**
-507 表示显存不足且降级也失败，通常是**别的程序占着显存**。用 `/preflight` 看空闲显存与占用进程，
-清理后重试；同时减小批量。
-
-**Q：长文本会报错吗？**
-不会，会被静默截断到档位上限（默认 512 token，约 512 个汉字）。用
-`usage.prompt_tokens == max_length` 判断截断。要更长文本，需要在部署侧换档位（见 README）。
-
-**Q：同一条文本编码两次，结果一模一样吗？**
-同一批量组成下逐位一致（实测偏差 `0`）；批量组成一变就不是逐位相同了，分量差约 `2.4e-04`，
-但不影响排序。详见 [2.3](#23-语义细节)。
-
-**Q：向量看起来都差不多 / 相似度普遍很高？**
-先排除空串（见 [2.3](#23-语义细节)）。其次注意 bge-m3 的相似度天然偏高，用排序而非绝对阈值。
-
-**Q：能换模型或降维吗（`dimensions=512`）？**
-不能，固定 bge-m3 稠密向量 1024 维；`dimensions` 只接受 1024 或省略。
-
-**Q：模型名写错了为什么没报错？**
-`model` 只回显不校验，见 [2.1](#21-请求字段-post-v1embeddings)。
-
-**Q：连接被拒绝 / 连不上？**
-服务没起来或换了端口。启动与排障见 [README.md](README.md)。
-
-**Q：`input` 能传 token 数组吗？**
-不能，只接受字符串或字符串数组，传数字数组会 422。
-
-## 7. 兼容性边界
-
-本服务实现的是 OpenAI `/v1/embeddings` 的**子集**，与官方 API 的差异：
-
-| 能力 | 本服务 |
-| --- | --- |
-| 未知字段（`user` 等） | 接受并忽略（实测 200） |
-| `model` 取值 | 不校验，原样回显 |
-| `input` 为 token id 数组 | **不支持**（422） |
-| `dimensions` 降维 | **不支持**（只接受 1024） |
-| `encoding_format` | 只支持 `float`、`base64`（`hex` 等 → 400） |
-| 单请求条数上限 | 256（超出 → 400） |
-| 输出维度 | 固定 1024，已 L2 归一化 |
-| 稀疏 / ColBERT 多向量 | **不提供**，只有稠密向量 |
-| 鉴权 | 无（默认只绑定 127.0.0.1） |
-
-因此把既有客户端的 `base_url` 指过来通常可直接跑通，但要注意 `dimensions` 与 token 数组这两项会直接报错，
-以及 `model` 不校验这一静默风险。
-
-## 8. 自检脚本
-
-`scripts/check_api.py` 是**调用方视角的黑盒验收**：只通过 HTTP 打接口，不 import 仓库任何模块，
-所以可以直接拷进你自己的项目用。服务需先启动。
-
-```bash
+```powershell
 python scripts/check_api.py
 python scripts/check_api.py --base http://127.0.0.1:8000 --timeout 120
 ```
 
-四组共 17 项断言：
+| 参数 | 默认 | 说明 |
+| --- | --- | --- |
+| `--base` | `http://127.0.0.1:8000` | 服务地址 |
+| `--timeout` | 120.0 | 单请求超时秒数 |
+
+只通过 HTTP 打接口、不 import 仓库任何模块，因此**可以直接拷给调用方**。四组共 17 项断言：
 
 | 组 | 检查什么 |
 | --- | --- |
 | 服务状态 | `/healthz` 可达、`degradations` 为空 |
 | 向量化契约 | 形状 1024、`index` 顺序、L2 归一化、单条与批量方向一致、乱序还原、可复现性 |
 | 编码与边界 | `base64` 与 `float` 逐位一致、超长截断、256 / 257 条上限、空串行为 |
-| 检索质量 | 三组标注语料，验证期望文档确实排 Top1 |
+| 检索质量 | 三组标注语料（含期望命中文档），验证目标文档确实排 Top1 |
 
-退出码 `0` = 全部通过，`1` = 有失败项，可直接接进你自己的 CI 或部署后验收。
-
-实测输出（默认档位）：
+实测输出（默认档位，耗时 1.82s）：
 
 ```
 ── 2/4 向量化契约 ──
@@ -369,7 +165,115 @@ python scripts/check_api.py --base http://127.0.0.1:8000 --timeout 120
 
 ── 4/4 检索质量 ──
   [PASS] 检索命中「怎么把文本变成向量做召回」  Top1=doc0  doc0:+0.6686  doc3:+0.4914 ...
+
+结论：全部通过（17 项），警告 1 项，耗时 1.82s
 ```
 
-`[WARN]` 不算失败，意思是「服务行为符合预期，但你要知道这件事」——空串那条就是。
-检索那组用的是脚本自带的语料，与 [4. 检索示例](#4-检索示例) 不是同一批文本，分数不可直接对比。
+`[WARN]` 不算失败，意思是「服务行为符合预期，但你要知道这件事」。退出码 `0` 全部通过、`1` 有失败项，
+可直接接进部署后的验收步骤。
+
+其中「单条与批量的方向一致」这项断言的是**方向**而不是逐位相等，原因是实测发现：批大小一变，
+FP16 的 reduction 顺序就变，同长同内容的三条批里就有 `2.44e-04` 的分量偏差（与 padding、批内位置都无关），
+方向偏差则在 `1e-5` 量级、不影响排序。要做向量指纹或逐位比对，必须固定批量组成。
+
+## 6. 压测与回填档位 bench.py
+
+```powershell
+python scripts/bench.py                      # 默认阶梯 512/1024/2048/4096/8192
+python scripts/bench.py --lengths 512,1024   # 只跑指定档
+python scripts/bench.py --batch 4            # 强制批大小，覆盖按预算推导的值
+```
+
+| 参数 | 默认 | 说明 |
+| --- | --- | --- |
+| `--lengths` | `512,1024,2048,4096,8192` | 逗号分隔的序列长度阶梯 |
+| `--out` | `.bench_result.json` | 结果落盘路径（已 gitignore） |
+| `--batch` | 0 = 按 token 预算推导 | 强制指定批大小 |
+
+**跑之前先停服务**（理由见 [1. 脚本总览](#1-脚本总览)）。输出形如：
+
+```
+  len   512  batch  8    1.500s  峰值  1277 MiB  设备增量   190 MiB
+  len  1024  batch  8    0.500s  峰值  1717 MiB  设备增量   630 MiB
+  len  4096  batch  2    1.250s  峰值  3217 MiB  设备增量  2130 MiB
+  len  8192  batch  1  153.000s  峰值    ... MiB  设备增量    ... MiB  (已降级到 CPU，本档 GPU 不可行)
+```
+
+两种标记要看懂：
+
+- **`已降批`**：这一档按预算推导的批大小触发了 OOM，脚本自动减半重试后成功
+- **`已降级到 CPU，本档 GPU 不可行`**：编码器内部 OOM 后自己降到了 CPU，这一档**根本没跑在 GPU 上**。
+  不标出来就会被误判成"通过"，然后推荐一个不可行的档位 —— 8192 档就是这样（单批 153s）
+
+结果写入 `.bench_result.json`，同时打印建议回填的档位：
+
+```
+建议写回 settings.PRESETS 的档位（activation_mib 已含 20% 余量）：
+  safe: {'max_length': 512, 'batch': 8, 'activation_mib': 224}
+  ...
+```
+
+把 `max_length` / `batch` / `activation_mib` 填进 [src/settings.py](src/settings.py) 的 `PRESETS`。
+
+## 7. 测试 pytest
+
+```powershell
+python -m pytest tests/ -q                            # 纯逻辑：组批、配置装配、体检
+$env:BGE_SMOKE_MODEL=1; python -m pytest tests/ -q    # 追加需要真实权重与显存的用例
+```
+
+默认跑的用例不需要模型和显存，改配置逻辑后随手跑一遍即可。
+带 `BGE_SMOKE_MODEL=1` 的那些会真的加载模型，**同样要先停服务**。
+
+## 8. 典型工作流
+
+### 首次部署
+
+```powershell
+python -m src.preflight            # 先单独看一眼显存够不够，不够就清进程
+powershell -File scripts/start.ps1 # 起服务，等 Uvicorn running
+python scripts/check_api.py        # 另开一个窗口验收，17 项全过就算可用
+```
+
+### 换机器 / 换 torch 版本
+
+档位预估值是按卡实测的，换环境必须重测：
+
+```powershell
+python scripts/bench.py            # 停服务后跑
+# 把打印的建议回填 src/settings.py 的 PRESETS
+powershell -File scripts/start.ps1
+python scripts/check_api.py
+```
+
+### 排查「变慢了」
+
+```
+请求变慢
+  ├─ 查 /healthz 的 degradations  → 非空：有请求掉到 CPU 兜底了（单条 4096 token 约 45s）
+  │                                 处理：缩短单条文本 / 减小批量
+  ├─ 查 /healthz 的 preset        → 带 (forced)：启动时就降档了，上限比预期小
+  └─ 查 /preflight                → 看空闲显存和占用进程，判断是别人抢了显存还是你批次太大
+```
+
+## 9. 退出码与排障速查
+
+| 来源 | 码 | 含义 |
+| --- | --- | --- |
+| `start.ps1` | 1 | 端口被占；用 `-Port` 换端口或停掉旧进程 |
+| `start.ps1` | 3 | 解释器不能导入服务依赖；配 `.env.local` 的 `BGE_PYTHON` |
+| `src.preflight` | 1 | 显存体检未通过，服务未启动 |
+| `src.preflight` | 2 | 环境变量配置非法（未知档位等），拒绝带错配置启动 |
+| `bench.py` | 2 | 未启用 CUDA，压测无意义 |
+| `check_api.py` | 0 / 1 | 全部通过 / 有失败项 |
+
+| 现象 | 处理 |
+| --- | --- |
+| `port 8000 ... already in use` | `-Port 8001` 换端口，或停掉旧进程 |
+| 启动时 `exit 3` / `No module named uvicorn` | `.env.local` 的 `BGE_PYTHON` 没配或指向了不含依赖的环境 |
+| `/healthz` 显示 `preset: safe(forced)` | 启动时体检判定显存不足并自动降档；看启动日志「空闲 X < 所需 Y」那行，清理占用进程后重启 |
+| 日志出现「已转 CPU 兜底处理」 | 该请求没跑在 GPU 上，慢是正常的；`/healthz` 的 `degradations` 也会记录 |
+| 体检进程表全是「未上报」 | WDDM 驱动不上报单进程显存，只能按进程名人工判断谁是显存大户 |
+| `check_api.py` 报连不上 | 服务没起或端口不对；`Uvicorn running on ...` 那行才是就绪信号 |
+| `check_api.py` 某项 FAIL | 先看该行右侧的实测值；`[WARN]` 不是失败项 |
+| 日志里体检报告位置/顺序异常 | 重定向输出时为行缓冲，不会滞留；若整段缺失说明进程被强杀 |

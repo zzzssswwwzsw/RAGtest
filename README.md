@@ -10,8 +10,8 @@
 - 真 OOM 时逐级降级（清缓存 → 批减半 → 单条转 CPU），服务本身不崩
 - 加载前显存体检：不足时列出占用进程由你决定清理谁，**绝不自动结束他人进程**
 
-本 README 面向**部署与运维**；**调用方**（写代码调接口的人）请看
-[USER_MANUAL.md](USER_MANUAL.md)，那份侧重接口契约、批量与超时策略、向量使用与错误处理。
+本 README 覆盖**部署、接口契约与配置**；**操作本项目脚本**（启动、体检、压测、验收、测试）
+请看 [USER_MANUAL.md](USER_MANUAL.md)。
 
 设计依据、取舍过程与实测记录见 [bge-m3-cuda-embedding-plan.md](bge-m3-cuda-embedding-plan.md)。
 
@@ -214,8 +214,7 @@ python scripts/check_api.py --base http://127.0.0.1:8000 --timeout 120
 结论：全部通过（17 项），警告 1 项，耗时 1.82s
 ```
 
-那条 `[WARN]` 是空串会返回可用向量这一已知行为，非失败项，详见
-[USER_MANUAL.md](USER_MANUAL.md)。
+那条 `[WARN]` 是空串会返回可用向量这一已知行为，非失败项。
 
 ## 已知限制
 
@@ -229,6 +228,9 @@ python scripts/check_api.py --base http://127.0.0.1:8000 --timeout 120
   桌面负载较高时会自动降档到 `safe(forced)` batch=1，日志与 `/healthz` 都会显式标明
 - **CPU 兜底很慢**：4096 token 单条约 45 s。客户端超时设置要据此放宽，否则会看到超时而不是结果；
   兜底还要在宿主内存里再放一份 fp32 权重（约 2.3 GiB），`/preflight` 的 `host_ram_ok` 为 false 时表示不一定给得起
+- **客户端超时不会取消服务端的计算**：调用方在 1.5 s 放弃等待后，那个大请求仍在服务端跑完并返回 200，
+  且一直占着一个并发槽。所以「超时后立刻重试」只会让 GPU 上叠加计算，越试越慢 —— 正确做法是放宽
+  超时（建议 120 s）而不是重试
 - 仅在 Windows 11 + NVIDIA + CUDA 环境验证过；非 Windows 下控制台编码相关的兜底逻辑不会生效
 
 ## 排障
