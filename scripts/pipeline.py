@@ -47,7 +47,7 @@ DIM = 1024
 # 单块最大字符数。中文大约 1 字 1 token，直接按字符数近似 token 数。
 # 不得超过当前档位的 max_length（默认档位 512），否则服务端会静默截断，
 # 块尾的内容等于白切 —— 启动时脚本会拿 /healthz 的 max_length 校验这一点。
-CHUNK_SIZE = 400
+CHUNK_SIZE = 256
 
 # 相邻块之间保留的重叠字符数。切点落在句子中间时，靠它保住跨块的语义。
 CHUNK_OVERLAP = 50
