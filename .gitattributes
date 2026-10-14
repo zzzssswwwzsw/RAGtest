@@ -1,0 +1,20 @@
+# 换行与编码基线：源码/文本一律 LF 入库与检出，避免 Windows 下整文件 diff
+* text=auto eol=lf
+
+# 图片、模型权重、可执行文件等不做换行转换
+*.png      binary
+*.jpg      binary
+*.jpeg     binary
+*.gif      binary
+*.ico      binary
+*.pdf      binary
+*.safetensors binary
+*.bin      binary
+*.pt       binary
+*.pth      binary
+*.onnx     binary
+*.h5       binary
+*.zip      binary
+*.exe      binary
+*.dll      binary
+*.so       binary
