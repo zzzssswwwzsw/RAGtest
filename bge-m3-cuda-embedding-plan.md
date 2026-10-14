@@ -192,3 +192,76 @@ python -m uvicorn src.api:app --host 127.0.0.1 --port 8000 --workers 1
   降 batch 至 4 → 提高 `MEM_FRACTION` 冗余（调低至 0.55）→ 长文本改 CPU 处理。
 - **FlagEmbedding 依赖冲突**：回退方案为 `transformers` 直调 + CLS pooling + L2 归一化（等价实现）。
 - **WDDM 换页**：硬上限已阻断；若仍出现卡顿，说明桌面占用过高，走体检提示清理流程。
+
+## 九、Git 提交规范（Conventional Commits）
+
+**仓库约定**：`origin` → `https://github.com/zzzssswwwzsw/RAGtest.git`，主分支 `main`。
+本项目为单人本地开发，所有提交直接落到 `main` 并推送到 `origin/main`，不引入 PR 流程与长期旁支。
+
+**格式**
+
+```
+<type>(<scope>): <subject>
+
+<body>
+
+<footer>
+```
+
+| 部分 | 规则 |
+|---|---|
+| `type` | 必填，只能取下表之一；一次提交只允许一个 type |
+| `(scope)` | 选填，模块名，取 `preflight` / `embedder` / `api` / `settings` / `deps` / `env` / `plan` 等 |
+| `subject` | 必填，中文，动宾结构，≤ 50 字符，句末不加句号 |
+| `body` | 选填，说明**为什么**这样改，而非改了什么；每行 ≤ 72 字符 |
+| `footer` | 选填，`BREAKING CHANGE:` 或 `Closes #123` |
+
+**type 取值**
+
+| type | 用途 |
+|---|---|
+| `feat` | 新增功能（如新增接口、新增显存档位） |
+| `fix` | 修复缺陷（如 OOM 降级逻辑错误） |
+| `docs` | 仅文档变更（如本方案） |
+| `style` | 不影响行为的格式调整（空格、缩进） |
+| `refactor` | 重构，既不新增功能也不修复缺陷 |
+| `perf` | 性能优化（如组批策略调优） |
+| `test` | 测试相关（新增或修改用例） |
+| `build` | 构建系统或依赖变更（如 requirements.txt） |
+| `ci` | CI 配置与脚本 |
+| `chore` | 杂项，不改动 `src/` 与 `tests/`（如 .gitignore） |
+| `revert` | 回滚此前的某次提交 |
+
+**硬性约束**
+
+1. **原子提交**：一次提交只表达一件事，禁止把"加接口 + 改依赖 + 调格式"混在同一个提交里。
+2. **禁止提交大文件与密钥**：`models/`、`*.safetensors`、`.venv/`、`.env` 已由 `.gitignore` 排除；
+   提交前必须 `git status` 复核，模型权重与虚拟环境永不入库。
+3. **禁止 `git add -A` / `git add .`**：只暂存本次改动涉及的明确文件路径。
+4. **提交前复核**：每次提交前执行 `git status` 与 `git diff`，确认暂存内容与提交信息一致。
+5. **推送**：每个提交完成后即 `git push` 到 `origin/main`，保持远程与本地同步。
+
+**示例**
+
+```
+feat(preflight): 加载模型前检测显存并按占用排序提示清理
+
+桌面程序常占用约 1.2GB 显存，加载前体检可避免直接 OOM。
+提供 Enter 重测 / s 强制继续 / q 退出三个分支。
+
+Closes #3
+```
+
+```
+fix(embedder): 捕获 CUDA OOM 后按批减半重试并回收显存
+
+原先 OOM 会直接抛出 500 并终止服务，现改为逐级降级重试，
+使服务可用性不再受单次请求影响。
+```
+
+```
+chore(deps): 锁定 torch 2.3.1+cu121 与 numpy 1.26.4
+
+驱动 552.22 对应 CUDA 12.4，向下兼容 cu121 运行时；
+numpy 必须小于 2.0，否则 FlagEmbedding 无法正常加载。
+```
