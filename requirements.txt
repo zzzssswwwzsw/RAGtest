@@ -1,0 +1,27 @@
+# requirements.txt —— bge-m3 CUDA 服务依赖清单，版本锁定以复现 6GB 显存实测环境
+#
+# torch 走 PyTorch 官方 cu121 源：驱动 552.22 对应 CUDA 12.4，向下兼容 12.1 运行时；
+# 公共 PyPI 上 Windows 版 torch 只有 CPU 构建，必须靠这条 extra 源取到 +cu121 轮子。
+--extra-index-url https://download.pytorch.org/whl/cu121
+
+torch==2.3.1+cu121
+transformers==4.40.2
+FlagEmbedding==1.2.11
+# FlagEmbedding 1.2.11 的 flag_reranker 里 import peft，依赖声明里却没有它，
+# 缺了它连 `import FlagEmbedding` 都失败（本项目只用 dense 也躲不开包级 __init__）。
+# 锁 0.11.1 是因为更高的 peft 版本会把 transformers 顶到 4.45+，破坏上面的锁定。
+peft==0.11.1
+sentencepiece==0.2.0
+# numpy 必须 < 2.0：FlagEmbedding 1.2.x 未适配 numpy 2 的 ABI，否则导入即崩
+numpy==1.26.4
+
+fastapi==0.111.0
+uvicorn==0.30.1
+pydantic==2.7.1
+# fastapi TestClient 依赖 httpx，冒烟测试用
+httpx==0.27.0
+
+# pynvml，显存体检的底层库封装
+nvidia-ml-py==12.535.133
+
+pytest==8.2.0
