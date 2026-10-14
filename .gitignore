@@ -27,6 +27,13 @@ config.local.*
 logs/
 .bench_result.json
 
+# ---- 数据集管线产物（派生文件，可重建；源文本 data/raw/ 正常入库）----
+# 用 "忽略全部 + 放行 .gitkeep" 而不是整目录忽略：这样目录结构在仓库里可见
+data/chunks/*
+!data/chunks/.gitkeep
+data/embeddings/*
+!data/embeddings/.gitkeep
+
 # ---- 编辑器 / 系统 -----
 .vscode/
 .idea/
