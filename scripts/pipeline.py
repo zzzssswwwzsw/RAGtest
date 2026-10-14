@@ -146,15 +146,24 @@ def split_text(text: str, size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) 
     return chunks
 
 
-def write_chunks(path: Path, chunks: list[str]) -> None:
+def write_chunks(path: Path, chunks: list[str]) -> bool:
+    """写块文件，返回内容是否真的变了。
+
+    内容没变就不再写一次：重写会刷新 mtime，向量化阶段按「块比向量新」判断，
+    就会把全部向量重算一遍 —— 重跑 --stage raw 本该只补新增和改动过的部分。
+    """
     lines: list[str] = []
     for index, chunk in enumerate(chunks, start=1):
         lines.append(f"{CHUNK_MARK}{index:04d} =====")
         lines.append(chunk)
+    body = "\n".join(lines) + "\n"
+    if path.exists() and path.read_text(encoding="utf-8") == body:
+        return False
     # 用 open 而不是 Path.write_text：后者的 newline 参数要 Python 3.10+，
     # 而这个脚本是给调用方用的，不该绑死在某个小版本上（本机 PATH 上就是 3.8）。
     with open(path, "w", encoding="utf-8", newline="\n") as handle:
-        handle.write("\n".join(lines) + "\n")
+        handle.write(body)
+    return True
 
 
 def read_chunks(path: Path) -> list[str]:
@@ -221,8 +230,9 @@ def stage_chunk(raw_files: list[Path]) -> list[Path]:
             info(f"{raw.name}: 空文件，跳过")
             continue
         target = CHUNK_DIR / f"{raw.stem}.txt"
-        write_chunks(target, chunks)
-        info(f"raw/{raw.name} -> {CHUNK_DIR.name}/{target.name}  切出 {len(chunks)} 块")
+        changed = write_chunks(target, chunks)
+        note = "" if changed else "  内容未变"
+        info(f"raw/{raw.name} -> {CHUNK_DIR.name}/{target.name}  切出 {len(chunks)} 块{note}")
         written.append(target)
     return written
 
