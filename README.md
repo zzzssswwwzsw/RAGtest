@@ -10,7 +10,7 @@
 - 真 OOM 时逐级降级（清缓存 → 批减半 → 单条转 CPU），服务本身不崩
 - 加载前显存体检：不足时列出占用进程由你决定清理谁，**绝不自动结束他人进程**
 
-本 README 覆盖**部署、接口契约与配置**；**操作本项目脚本**（启动、体检、压测、验收、测试）
+本 README 覆盖**部署、接口契约与配置**；**逐步操作脚本**（启动、数据集测试、体检、压测、验收、测试）
 请看 [USER_MANUAL.md](USER_MANUAL.md)。
 
 设计依据、取舍过程与实测记录见 [bge-m3-cuda-embedding-plan.md](bge-m3-cuda-embedding-plan.md)。
@@ -23,8 +23,12 @@ src/preflight.py     体检：显存/内存探测、占用进程列表、交互�
 src/embedder.py      编码器：组批、FP16 前向、OOM 降级链路
 src/api.py           FastAPI：/v1/embeddings、/healthz、/preflight
 scripts/start.ps1    启动脚本：探端口 → 体检 → 单 worker 拉起服务
-scripts/bench.py     显存阶梯压测，用于回填档位预估值
+scripts/pipeline.py  数据集测试：原文本 → 切块 → 向量化 → 查询匹配度
 scripts/check_api.py 调用方视角验收：向量化契约 + 检索质量（黑盒，可单独拷走）
+scripts/bench.py     显存阶梯压测，用于回填档位预估值
+data/raw/            原文本，每篇一个 .txt（样例，换成你自己的）
+data/chunks/         切割后的文本（派生文件，gitignore）
+data/embeddings/     向量 .npy，float32 (块数, 1024)（派生文件，gitignore）
 tests/test_smoke.py  冒烟测试（模型用例默认跳过）
 ```
 
@@ -215,6 +219,32 @@ python scripts/check_api.py --base http://127.0.0.1:8000 --timeout 120
 ```
 
 那条 `[WARN]` 是空串会返回可用向量这一已知行为，非失败项。
+
+## 数据集测试
+
+拿自己的文本验证「切块参数合不合适、检索准不准」。数据分三级目录，`raw/` 手工维护，
+后两级是派生文件（已 gitignore）：
+
+```
+data/raw/          原文本 .txt        ← 放你的文本
+data/chunks/       切割后的文本 .txt   ← 块之间以 "===== chunk 0001 =====" 分隔
+data/embeddings/   向量 .npy          ← float32，形状 (块数, 1024)
+```
+
+服务起来之后：
+
+```powershell
+python scripts/pipeline.py --stage raw --query "你的问题"   # 切块 → 向量化 → 查询
+python scripts/pipeline.py --stage embeddings              # 只查询，不带 --query 进交互模式
+```
+
+`--stage` 决定从哪一步开始（`raw` / `chunks` / `embeddings`），只换查询词时用 `embeddings` 最快。
+要改**块大小 / 重叠 / 切割规则**，改 [scripts/pipeline.py](scripts/pipeline.py) 顶部常量区的
+`CHUNK_SIZE` / `CHUNK_OVERLAP` / `CHUNK_SEPARATORS`，然后重跑 `--stage raw`。
+
+`check_api.py` 与 `pipeline.py` 的分工：前者管「服务本身对不对」（固定语料，换机器结论一致），
+后者管「你的数据切得好不好、检索准不准」。完整参数与调参说明见
+[USER_MANUAL.md](USER_MANUAL.md) 第 4 节。
 
 ## 已知限制
 
