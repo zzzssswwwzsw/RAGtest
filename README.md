@@ -10,6 +10,9 @@
 - 真 OOM 时逐级降级（清缓存 → 批减半 → 单条转 CPU），服务本身不崩
 - 加载前显存体检：不足时列出占用进程由你决定清理谁，**绝不自动结束他人进程**
 
+本 README 面向**部署与运维**；**调用方**（写代码调接口的人）请看
+[USER_MANUAL.md](USER_MANUAL.md)，那份侧重接口契约、批量与超时策略、向量使用与错误处理。
+
 设计依据、取舍过程与实测记录见 [bge-m3-cuda-embedding-plan.md](bge-m3-cuda-embedding-plan.md)。
 
 ## 目录结构
