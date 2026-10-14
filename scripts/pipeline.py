@@ -227,6 +227,22 @@ def stage_chunk(raw_files: list[Path]) -> list[Path]:
     return written
 
 
+def prune_orphans(keep: set[str]) -> None:
+    """清掉 raw/ 里已经不存在的块文件与向量文件。
+
+    只按 raw/ 新增是危险的：删掉一篇原文本后，它的旧块仍在 chunks/ 里，
+    会被照常读进语料，检索结果里就混着已经删掉的文档。raw/ 是权威来源。
+    """
+    orphans = [
+        path
+        for path in sorted(CHUNK_DIR.glob("*.txt")) + sorted(VECTOR_DIR.glob("*.npy"))
+        if path.stem not in keep
+    ]
+    for path in orphans:
+        path.unlink()
+        info(f"清理孤儿文件 {path.parent.name}/{path.name}")
+
+
 def stage_embed(client: Client, chunk_files: list[Path], force: bool) -> None:
     """chunks/*.txt -> embeddings/*.npy。已是最新的默认跳过，--force 强制重算。"""
     for chunk_file in chunk_files:
@@ -347,6 +363,7 @@ def main() -> int:
             print(f"  {RAW_DIR} 里没有 .txt，放几篇原文本再跑")
             return 1
         info(f"共 {len(raw_files)} 篇：{', '.join(f.name for f in raw_files)}")
+        prune_orphans({raw.stem for raw in raw_files})
         stage_chunk(raw_files)
 
         step("2/3 向量化")
