@@ -2,7 +2,7 @@
 
 三个数据目录（缺失时脚本自动创建）：
 
-    data/raw/         原文本，每篇一个 .txt。人工维护，入库。
+    data/raw/         原文本，每篇一个 .txt。人工维护，本机私有，不入库。
     data/chunks/      切割后的文本，每篇一个 .txt，块之间以
                       "===== chunk 0001 =====" 分隔。派生文件，gitignore。
     data/embeddings/  向量，每篇一个 .npy，float32 形状 (块数, 1024)。派生文件，gitignore。

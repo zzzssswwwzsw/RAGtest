@@ -26,7 +26,7 @@ scripts/start.ps1    启动脚本：探端口 → 体检 → 单 worker 拉起�
 scripts/pipeline.py  数据集测试：原文本 → 切块 → 向量化 → 查询匹配度
 scripts/check_api.py 调用方视角验收：向量化契约 + 检索质量（黑盒，可单独拷走）
 scripts/bench.py     显存阶梯压测，用于回填档位预估值
-data/raw/            原文本，每篇一个 .txt（样例，换成你自己的）
+data/raw/            原文本，每篇一个 .txt（本机私有，不入库）
 data/chunks/         切割后的文本（派生文件，gitignore）
 data/embeddings/     向量 .npy，float32 (块数, 1024)（派生文件，gitignore）
 tests/test_smoke.py  冒烟测试（模型用例默认跳过）
@@ -222,8 +222,8 @@ python scripts/check_api.py --base http://127.0.0.1:8000 --timeout 120
 
 ## 数据集测试
 
-拿自己的文本验证「切块参数合不合适、检索准不准」。数据分三级目录，`raw/` 手工维护，
-后两级是派生文件（已 gitignore）：
+拿自己的文本验证「切块参数合不合适、检索准不准」。数据分三级目录，**三级都不入库**
+（仓库里只保留三个 `.gitkeep` 占位目录；`raw/` 是各自私有的语料，不该跟着代码走）：
 
 ```
 data/raw/          原文本 .txt        ← 放你的文本

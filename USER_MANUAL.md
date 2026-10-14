@@ -118,13 +118,14 @@ INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
 
 ```
 data/
-├── raw/          原文本，每篇一个 .txt。人工维护，入库
+├── raw/          原文本，每篇一个 .txt。人工维护，本机私有，不入库
 ├── chunks/       切割后的文本，每篇一个 .txt。派生文件，已 gitignore
 └── embeddings/   向量，每篇一个 .npy。派生文件，已 gitignore
 ```
 
 - 三个目录脚本会自动创建；文件名是文档标识，块文件与向量文件跟原文件同名，只换扩展名
-- `raw/` 里现有的三篇是**样例，直接删掉换成你自己的**
+- `raw/` **只在本机**：仓库里只有一个 `.gitkeep` 占位，原文不会跟着提交（语料往往比代码更敏感）。
+  换机器要自己把文本拷过去，再跑一次 `--stage raw` 重建块与向量
 - `chunks/*.txt` 用 `===== chunk 0001 =====` 分隔，可以直接打开肉眼检查切得对不对
 - `embeddings/*.npy` 是 float32、形状 `(块数, 1024)`，`np.load()` 直接读
 

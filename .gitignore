@@ -27,8 +27,11 @@ config.local.*
 logs/
 .bench_result.json
 
-# ---- 数据集管线产物（派生文件，可重建；源文本 data/raw/ 正常入库）----
-# 用 "忽略全部 + 放行 .gitkeep" 而不是整目录忽略：这样目录结构在仓库里可见
+# ---- 数据集目录（原文与派生文件一律不入库，只留目录占位）----
+# 用 "忽略全部 + 放行 .gitkeep" 而不是整目录忽略：这样目录结构在仓库里可见。
+# raw/ 也一并忽略：语料往往比代码敏感，进仓库会连检索结果一起泄露出去。
+data/raw/*
+!data/raw/.gitkeep
 data/chunks/*
 !data/chunks/.gitkeep
 data/embeddings/*
