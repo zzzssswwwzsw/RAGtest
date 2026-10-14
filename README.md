@@ -18,13 +18,14 @@
 ## 目录结构
 
 ```
-src/settings.py     显存预算常量、档位预设、环境变量装配
-src/preflight.py    体检：显存/内存探测、占用进程列表、交互降级、CLI 入口
-src/embedder.py     编码器：组批、FP16 前向、OOM 降级链路
-src/api.py          FastAPI：/v1/embeddings、/healthz、/preflight
-scripts/start.ps1   启动脚本：探端口 → 体检 → 单 worker 拉起服务
-scripts/bench.py    显存阶梯压测，用于回填档位预估值
-tests/test_smoke.py 冒烟测试（模型用例默认跳过）
+src/settings.py      显存预算常量、档位预设、环境变量装配
+src/preflight.py     体检：显存/内存探测、占用进程列表、交互降级、CLI 入口
+src/embedder.py      编码器：组批、FP16 前向、OOM 降级链路
+src/api.py           FastAPI：/v1/embeddings、/healthz、/preflight
+scripts/start.ps1    启动脚本：探端口 → 体检 → 单 worker 拉起服务
+scripts/bench.py     显存阶梯压测，用于回填档位预估值
+scripts/check_api.py 调用方视角验收：向量化契约 + 检索质量（黑盒，可单独拷走）
+tests/test_smoke.py  冒烟测试（模型用例默认跳过）
 ```
 
 ## 环境准备
@@ -185,11 +186,45 @@ python -m pytest tests/ -q                      # 纯逻辑：组批、配置装
 $env:BGE_SMOKE_MODEL=1; python -m pytest tests/ -q   # 追加需要真实权重与显存的用例
 ```
 
+## 验收自检
+
+服务**跑起来之后**，用调用方视角的黑盒脚本确认接口契约与检索质量：
+
+```powershell
+python scripts/check_api.py
+python scripts/check_api.py --base http://127.0.0.1:8000 --timeout 120
+```
+
+它只通过 HTTP 打接口、不 import 仓库任何模块，因此也可以直接拷给调用方。
+检查项：向量形状/归一化/顺序对齐/可复现性、`base64` 与 `float` 逐位一致、
+超长文本截断、条数与档位上限、空串行为，以及三组标注语料（含期望命中文档）的检索排序。
+
+退出码 `0` 全部通过、`1` 有失败项，可直接接进部署后的验收步骤。正常情况如下
+（默认档位、本机实测）：
+
+```
+── 2/4 向量化契约 ──
+  [PASS] 输出形状 (n, 1024)  实测 (3, 1024)
+  [PASS] index 与输入顺序一一对应  index=[0, 1, 2]
+  [PASS] 向量已 L2 归一化  范数 0.999850 ~ 1.000202
+  [PASS] 单条与批量的方向一致  余弦 1.000435，分量偏差 2.44e-04（FP16 批效应，正常）
+  ...
+── 4/4 检索质量 ──
+  [PASS] 检索命中「怎么把文本变成向量做召回」  Top1=doc0  doc0:+0.6686  doc3:+0.4914 ...
+结论：全部通过（17 项），警告 1 项，耗时 1.82s
+```
+
+那条 `[WARN]` 是空串会返回可用向量这一已知行为，非失败项，详见
+[USER_MANUAL.md](USER_MANUAL.md)。
+
 ## 已知限制
 
 - **WDDM 不上报单进程显存占用**，体检的进程表只能给名字（会打印提示），仍需人工判断谁是显存大户
 - **真正先咬住的是 token 预算**，不是显存上限：默认预算把单批激活压到约 200 MiB，
   硬上限主要在超长单序列时兜底。反过来，`BGE_TOKEN_BUDGET` 调大后压力会转移到硬上限
+- **同一文本在不同批量组成下不是逐位相同**：批大小一变，FP16 的 reduction 顺序就变，
+  分量偏差实测约 2.4e-04（与 padding、批内位置无关）；方向偏差可忽略、不影响排序，
+  但要做向量指纹或逐位比对，必须固定批量组成
 - 体检的 `need_mib` 是偏保守的规划估值（weight + 上下文 + 激活 + 800 MiB 余量）。
   桌面负载较高时会自动降档到 `safe(forced)` batch=1，日志与 `/healthz` 都会显式标明
 - **CPU 兜底很慢**：4096 token 单条约 45 s。客户端超时设置要据此放宽，否则会看到超时而不是结果；
